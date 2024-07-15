@@ -40,7 +40,36 @@ uint16_t crc16_ccitt(const uint8_t *data, size_t length) {
     return crc;
 }
 
-void receive_data(const uint8_t *data, size_t length, uint16_t received_crc) {
+void send_data(int sock, const uint8_t *data, size_t length) {
+    uint8_t buffer[BUFFER_SIZE];
+    uint16_t crc = crc16_ccitt(data, length);
+    memcpy(buffer, data, length);
+    crc = htons(crc); // Ensure CRC is in network byte order
+    memcpy(buffer + length, &crc, sizeof(crc));
+    write(sock, buffer, length + sizeof(crc));
+    printf("Data sent: ");
+    for (size_t i = 0; i < length; i++) {
+        printf("%02X ", data[i]);
+    }
+    printf("CRC: %04X\n", ntohs(crc));
+}
+
+int receive_data(int sock, uint8_t *data, size_t length) {
+    uint8_t buffer[BUFFER_SIZE];
+    uint16_t received_crc;
+    int ret = read(sock, buffer, length + sizeof(received_crc));
+    if (ret < 0) {
+        return ret;
+    }
+    if (ret < length + sizeof(received_crc)) {
+        // Not enough data received
+        return -1;
+    }
+
+    memcpy(data, buffer, length);
+    memcpy(&received_crc, buffer + length, sizeof(uint16_t)); 
+    received_crc = ntohs(received_crc);
+
     uint16_t computed_crc = crc16_ccitt(data, length);
 
     if (computed_crc == received_crc) {
@@ -48,8 +77,8 @@ void receive_data(const uint8_t *data, size_t length, uint16_t received_crc) {
     } else {
         printf("Data corrupted. Received CRC: %04X, Computed CRC: %04X\n", received_crc, computed_crc);
     }
+    return ret;
 }
-
 void *handle_client(void *arg) {
     int client_socket = *((int *)arg);
     message_t msg;
@@ -66,8 +95,8 @@ void *handle_client(void *arg) {
     }
     pthread_mutex_unlock(&clients_mutex);
 
-    while ((bytes_read = read(client_socket, &msg, sizeof(msg))) > 0) {
-        msg.buffer[bytes_read - sizeof(int) * 4 - sizeof(int) * MAX_DESTINATIONS] = '\0'; // Ensure null termination
+    while ((bytes_read = receive_data(client_socket, (uint8_t *)&msg, sizeof(msg))) > 0) {
+        msg.buffer[BUFFER_SIZE - 1] = '\0'; // Ensure null termination
 
         // Relay message to the specified destination client
         pthread_mutex_lock(&clients_mutex);
@@ -75,18 +104,20 @@ void *handle_client(void *arg) {
             if (client_sockets[i] != 0 && client_sockets[i] != client_socket) {
                 for (int j = 0; j < msg.destination_num; ++j) {
                     if (msg.destination_id[j] == -1 || msg.destination_id[j] == client_ids[i]) { // Broadcast if destination_id is -1
-                        write(client_sockets[i], &msg, sizeof(msg));
+                        //write(client_sockets[i], &msg, sizeof(msg));
+                        send_data(client_sockets[i], (uint8_t *)&msg, sizeof(msg));
 
                         // Send ACK to source client
                         if (msg.ack == 0) { // Only send ACK for normal messages
                             message_t ack_msg;
                             ack_msg.source_id = msg.destination_id[j];
                             ack_msg.broadcast = 0;
-                             ack_msg.destination_num = 1;
+                            ack_msg.destination_num = 1;
                             ack_msg.destination_id[j] = msg.source_id;
                             ack_msg.ack = 1; // This is an ACK message
                             snprintf(ack_msg.buffer, BUFFER_SIZE, "ACK: Message received by %d", msg.destination_id[j]);
-                            write(client_socket, &ack_msg, sizeof(ack_msg));
+                            //write(client_socket, &ack_msg, sizeof(ack_msg));
+                            send_data(client_socket, (uint8_t *)&ack_msg, sizeof(ack_msg));
                         }
                     }
                 }
@@ -158,7 +189,8 @@ int main() {
                 client_sockets[i] = new_socket;
                 client_ids[i] = client_id_counter++;
                 // Send assigned ID to client
-                write(new_socket, &client_ids[i], sizeof(int));
+                //write(new_socket, &client_ids[i], sizeof(int));
+                send_data(new_socket, (uint8_t *)&client_ids[i], sizeof(int));
                 pthread_t tid;
                 int *new_sock = malloc(sizeof(int));
                 *new_sock = new_socket;

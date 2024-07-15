@@ -7,7 +7,7 @@
 #include <pthread.h>
 
 #define MAX_DESTINATIONS 3
-#define MAX_NUMBERS 2
+#define MAX_NUMBERS 3
 #define MAX_INPUT_SIZE 99
 #define PORT 8080
 #define BUFFER_SIZE 1024
@@ -22,26 +22,6 @@ typedef struct {
     int ack; // 0 for normal message, 1 for ACK
     char buffer[BUFFER_SIZE];
 } message_t;
-
-void *receive_messages(void *arg) {
-    int sock = *((int *)arg);
-    message_t msg;
-    int bytes_read;
-
-    while((bytes_read = read(sock, &msg, sizeof(msg))) > 0) {
-        msg.buffer[BUFFER_SIZE - 1] = '\0'; // Ensure null termination
-        printf("Received from %d: %s\n", msg.source_id, msg.buffer);
-    }
-
-    if (bytes_read == 0) {
-        printf("Server closed connection\n");
-    } else {
-        perror("recv");
-    }
-
-    close(sock);
-    return NULL;
-}
 
 uint16_t crc16_ccitt(const uint8_t *data, size_t length) {
     uint16_t crc = 0xFFFF; // Initial value
@@ -58,18 +38,66 @@ uint16_t crc16_ccitt(const uint8_t *data, size_t length) {
     return crc;
 }
 
+
 void send_data(int sock, const uint8_t *data, size_t length) {
     uint8_t buffer[BUFFER_SIZE];
     uint16_t crc = crc16_ccitt(data, length);
     memcpy(buffer, data, length);
     crc = htons(crc); // Ensure CRC is in network byte order
     memcpy(buffer + length, &crc, sizeof(crc));
-    send(sock, buffer, length + sizeof(crc), 0);
+    write(sock, buffer, length + sizeof(crc));
     printf("Data sent: ");
     for (size_t i = 0; i < length; i++) {
         printf("%02X ", data[i]);
     }
     printf("CRC: %04X\n", ntohs(crc));
+}
+
+int receive_data(int sock, uint8_t *data, size_t length) {
+    uint8_t buffer[BUFFER_SIZE];
+    uint16_t received_crc;
+    int ret = read(sock, buffer, length + sizeof(received_crc));
+    if (ret < 0) {
+        return ret;
+    }
+    if (ret < length + sizeof(received_crc)) {
+        // Not enough data received
+        return -1;
+    }
+
+
+    memcpy(data, buffer, length);
+    memcpy(&received_crc, buffer + length, sizeof(uint16_t)); 
+    received_crc = ntohs(received_crc);
+
+    uint16_t computed_crc = crc16_ccitt(data, length);
+
+    if (computed_crc == received_crc) {
+        printf("Data received correctly.\n");
+    } else {
+        printf("Data corrupted. Received CRC: %04X, Computed CRC: %04X\n", received_crc, computed_crc);
+    }
+    return ret;
+}
+
+void *receive_messages(void *arg) {
+    int sock = *((int *)arg);
+    message_t msg;
+    int bytes_read;
+
+    while((bytes_read = receive_data(sock, (uint8_t *)&msg, sizeof(msg))) > 0) {
+        msg.buffer[BUFFER_SIZE - 1] = '\0'; // Ensure null termination
+        printf("Received from %d: %s\n", msg.source_id, msg.buffer);
+    }
+
+    if (bytes_read == 0) {
+        printf("Server closed connection\n");
+    } else {
+        perror("recv");
+    }
+
+    close(sock);
+    return NULL;
 }
 
 int main() {
@@ -97,7 +125,7 @@ int main() {
     }
 
     // Receive assigned ID from server
-    read(sock, &client_id, sizeof(int));
+    receive_data(sock, (uint8_t *)&client_id, sizeof(int));
     printf("Connected to server with client ID: %d\n", client_id);
 
     // 메시지 수신 스레드 시작
@@ -108,7 +136,7 @@ int main() {
 
     /**/
     message_t msg;
-    msg.source_id = 1; // 클라이언트의 ID 설정
+    msg.source_id = client_id; // 클라이언트의 ID 설정
     msg.ack = 0;       // 일반 메시지
 
     while (1) {
@@ -138,26 +166,31 @@ int main() {
             printf("Error reading input.\n");
         }
 
-        msg.source_id = client_id;
-        msg.ack = 0;
+        if (num_count > MAX_DESTINATIONS) {
+            printf("Too many destination IDs. Maximum allowed is %d.\n", MAX_DESTINATIONS);
+            continue;
+        }
 
-        if (msg.destination_id[0] == -1) {
+        if (numbers[0] == -1) {
             msg.broadcast = 1;
             msg.destination_num = 0;
         } else {
             msg.broadcast = 0;
-            msg.destination_num = num_count > MAX_DESTINATIONS ? MAX_DESTINATIONS : num_count;
-            memcpy(msg.destination_id, &numbers[0], sizeof(msg.destination_id));
+            msg.destination_num = num_count;
+            memcpy(msg.destination_id, numbers, sizeof(int) * num_count);
         }
 
         printf("Enter message: ");
         scanf(" %[^\n]", msg.buffer);
 
         // 서버로 메시지 전송
+        /*
         if (write(sock, &msg, sizeof(msg)) < 0) {
             perror("Send failed");
             break;
         }
+        */
+       send_data(sock, (uint8_t *)&msg, sizeof(msg));
     }
 
     // 스레드 종료를 기다림
