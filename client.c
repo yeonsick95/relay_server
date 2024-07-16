@@ -40,7 +40,7 @@ uint16_t crc16_ccitt(const uint8_t *data, size_t length) {
 
 
 void send_data(int sock, const uint8_t *data, size_t length) {
-    uint8_t buffer[BUFFER_SIZE];
+    uint8_t buffer[sizeof(message_t) + sizeof(uint16_t)];
     uint16_t crc = crc16_ccitt(data, length);
     memcpy(buffer, data, length);
     crc = htons(crc); // Ensure CRC is in network byte order
@@ -54,7 +54,7 @@ void send_data(int sock, const uint8_t *data, size_t length) {
 }
 
 int receive_data(int sock, uint8_t *data, size_t length) {
-    uint8_t buffer[BUFFER_SIZE];
+    uint8_t buffer[sizeof(message_t) + sizeof(uint16_t)];
     uint16_t received_crc;
     int ret = read(sock, buffer, length + sizeof(received_crc));
     if (ret < 0) {
